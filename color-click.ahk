@@ -57,6 +57,7 @@ CoordMode "ToolTip", "Screen"
     点击方式: "消息",
     点击后还原: true,
     最小化自动还原: true,
+    挂边宽度: 6,
     检查间隔: 1000,
     点击后等待: 800,
     最大点击数: 0,
@@ -74,6 +75,11 @@ CoordMode "ToolTip", "Screen"
 本轮颜色     := []
 本轮备注     := ""
 本轮客户区   := {x:0, y:0, w:0, h:0}
+
+; 挂边模式状态
+挂边中   := false
+挂边原X  := 0
+挂边原Y  := 0
 
 ; 监控日志窗口
 日志Gui      := ""
@@ -325,6 +331,7 @@ CoordMode "ToolTip", "Screen"
     通用.点击方式     := 取串(m, "点击方式",   "消息")
     通用.点击后还原   := (取整(m, "点击后还原", 1) = 1)
     通用.最小化自动还原 := (取整(m, "最小化自动还原", 1) = 1)
+    通用.挂边宽度     := 取整(m, "挂边宽度", 6)
     通用.检查间隔     := 取整(m, "检查间隔",   1000)
     通用.点击后等待   := 取整(m, "点击后等待", 800)
     通用.最大点击数   := 取整(m, "最大点击数", 0)
@@ -377,6 +384,9 @@ CoordMode "ToolTip", "Screen"
     L.Push("; 后台模式专用：窗口被最小化时自动还原（最小化状态抓不到画面，")
     L.Push(";   还原后被别的窗口盖住没关系）。0 = 最小化就暂停并提示")
     L.Push("最小化自动还原=" . (通用.最小化自动还原 ? 1 : 0))
+    L.Push("; 挂边模式露出宽度（像素）。Chromium 窗口被完全遮挡会停止渲染，")
+    L.Push(";   挂边 = 把窗口挪到屏幕右缘只露几像素并置顶，画面就不会停")
+    L.Push("挂边宽度=" . 通用.挂边宽度)
     L.Push("")
     L.Push("; ─── 通用 ───")
     L.Push("检查间隔=" . 通用.检查间隔)
@@ -691,8 +701,8 @@ CoordMode "ToolTip", "Screen"
         日志Text.Text := "【已停止】    F1 开始 / 停止      F2 退出`n"
             . "取色 " . 通用.取色方式 . "   |   点击 " . 通用.点击方式
             . "   |   共 " . 规则集.Length . " 条规则`n"
-            . "Ctrl+Alt+L 显示/隐藏本窗口     Ctrl+Alt+0 重新载入配置`n"
-            . "标定用 pick-relative.ahk"
+            . "Ctrl+Alt+H 挂边（窗口只露一条边防停渲染）   Ctrl+Alt+L 显示/隐藏本窗口`n"
+            . "Ctrl+Alt+0 重新载入配置     标定用 pick-relative.ahk"
         return
     }
 
@@ -805,9 +815,18 @@ F1:: {
 }
 
 F2:: {
-    global 日志Gui
+    global 日志Gui, 挂边中, 挂边原X, 挂边原Y, 通用
     SetTimer(循环回调, 0)
     ToolTip()
+    ; 退出前把挂边的窗口还原回原位
+    if 挂边中 {
+        hwnd := WinExist(通用.目标窗口)
+        if hwnd {
+            WinGetPos(, , &ow2, &oh2, "ahk_id " . hwnd)
+            DllCall("MoveWindow", "Ptr", hwnd, "Int", 挂边原X, "Int", 挂边原Y, "Int", ow2, "Int", oh2, "Int", 1)
+            WinSetAlwaysOnTop(false, "ahk_id " . hwnd)
+        }
+    }
     if 日志Gui
         try 日志Gui.Destroy()
     ExitApp()
@@ -815,6 +834,41 @@ F2:: {
 
 ; 显示 / 隐藏监控日志窗口
 ^!l:: 切换日志()
+
+; 挂边模式：窗口挪到屏幕右缘只露一条边并置顶（防止 Chromium 停止渲染）
+^!h:: 切换挂边()
+
+切换挂边() {
+    global 通用, 挂边中, 挂边原X, 挂边原Y
+
+    hwnd := WinExist(通用.目标窗口)
+    if !hwnd {
+        短暂提示("未找到目标窗口，无法挂边")
+        return
+    }
+
+    if 挂边中 {
+        WinGetPos(, , &ow2, &oh2, "ahk_id " . hwnd)
+        DllCall("MoveWindow", "Ptr", hwnd, "Int", 挂边原X, "Int", 挂边原Y, "Int", ow2, "Int", oh2, "Int", 1)
+        WinSetAlwaysOnTop(false, "ahk_id " . hwnd)
+        挂边中 := false
+        短暂提示("已还原窗口位置和层级")
+    } else {
+        if DllCall("IsIconic", "Ptr", hwnd, "Int")
+            WinRestore("ahk_id " . hwnd)
+        WinGetPos(&ox, &oy, &ow, &oh, "ahk_id " . hwnd)
+        挂边原X := ox
+        挂边原Y := oy
+        宽 := 通用.挂边宽度
+        if (宽 < 2)
+            宽 := 2
+        ; 挪到屏幕右缘，只留「宽」像素在屏幕内，其余悬在屏幕外
+        DllCall("MoveWindow", "Ptr", hwnd, "Int", A_ScreenWidth - 宽, "Int", oy, "Int", ow, "Int", oh, "Int", 1)
+        WinSetAlwaysOnTop(true, "ahk_id " . hwnd)
+        挂边中 := true
+        短暂提示("已挂边：只露 " . 宽 . "px 在屏幕右缘（置顶），画面不会停。再按 Ctrl+Alt+H 还原")
+    }
+}
 
 ^!0:: {
     global 日志可见
