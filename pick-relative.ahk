@@ -186,6 +186,7 @@ CoordMode "ToolTip", "Screen"
         L.Push("取色方式=后台")
         L.Push("点击方式=消息")
         L.Push("点击后还原=1")
+        L.Push("最小化自动还原=1")
         L.Push("")
         L.Push("; ─── 通用 ───")
         L.Push("检查间隔=1000")

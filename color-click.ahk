@@ -56,6 +56,7 @@ CoordMode "ToolTip", "Screen"
     取色方式: "后台",
     点击方式: "消息",
     点击后还原: true,
+    最小化自动还原: true,
     检查间隔: 1000,
     点击后等待: 800,
     最大点击数: 0,
@@ -180,18 +181,79 @@ CoordMode "ToolTip", "Screen"
 }
 
 ; ══════════════════════════════════════════════════════════════
+;  找出真正接收鼠标消息的窗口
+;  Chromium/CEF 内核（抖音小游戏就是）的鼠标输入实际由子窗口
+;  Chrome_RenderWidgetHostHWND 处理，发给顶层窗口是没反应的。
+;  找不到该子窗口时，沿子窗口层级下钻找包含该点的最深窗口兜底。
+;  入参 cx,cy 是顶层客户区坐标；出参 tx,ty 是目标窗口客户区坐标
+; ══════════════════════════════════════════════════════════════
+找消息目标(hwnd, cx, cy, &thwnd, &tx, &ty) {
+    ; 顶层客户区坐标 -> 屏幕坐标
+    pt := Buffer(8)
+    NumPut("Int", cx, "Int", cy, pt)
+    DllCall("ClientToScreen", "Ptr", hwnd, "Ptr", pt)
+    sx := NumGet(pt, 0, "Int")
+    sy := NumGet(pt, 4, "Int")
+
+    thwnd := hwnd
+
+    ; 1) Chromium 系：直接找 Chrome_RenderWidgetHostHWND
+    rwh := 0
+    child := 0
+    loop {
+        child := DllCall("FindWindowExW", "Ptr", hwnd, "Ptr", child, "Ptr", 0, "Ptr", 0, "Ptr")
+        if !child
+            break
+        cls := Buffer(512)
+        DllCall("GetClassNameW", "Ptr", child, "Ptr", cls, "Int", 256)
+        if (StrGet(cls, "UTF-16") = "Chrome_RenderWidgetHostHWND") {
+            rwh := child
+            break
+        }
+    }
+    if rwh {
+        thwnd := rwh
+    } else {
+        ; 2) 兜底：逐层下钻，找包含该点的最深子窗口
+        cur := hwnd
+        loop 6 {
+            ptc := Buffer(8)
+            NumPut("Int", sx, "Int", sy, ptc)
+            DllCall("ScreenToClient", "Ptr", cur, "Ptr", ptc)
+            lx := NumGet(ptc, 0, "Int")
+            ly := NumGet(ptc, 4, "Int")
+            ; POINT 按值传参：低 32 位 x、高 32 位 y
+            deeper := DllCall("ChildWindowFromPoint", "Ptr", cur, "Int64", (ly << 32) | (lx & 0xFFFFFFFF), "Ptr")
+            if !deeper || (deeper = cur)
+                break
+            cur := deeper
+        }
+        if (cur != hwnd)
+            thwnd := cur
+    }
+
+    ; 屏幕坐标 -> 目标窗口客户区坐标
+    pt2 := Buffer(8)
+    NumPut("Int", sx, "Int", sy, pt2)
+    DllCall("ScreenToClient", "Ptr", thwnd, "Ptr", pt2)
+    tx := NumGet(pt2, 0, "Int")
+    ty := NumGet(pt2, 4, "Int")
+}
+
+; ══════════════════════════════════════════════════════════════
 ;  点击：cx, cy 是「窗口内坐标」，sx, sy 是对应的屏幕坐标
 ; ══════════════════════════════════════════════════════════════
 点击(hwnd, cx, cy, sx, sy) {
     global 通用
 
     if (通用.点击方式 = "消息") {
-        lp := ((cy & 0xFFFF) << 16) | (cx & 0xFFFF)
-        PostMessage(0x0200, 0,      lp, , "ahk_id " . hwnd)   ; WM_MOUSEMOVE
+        找消息目标(hwnd, cx, cy, &thwnd, &tx, &ty)
+        lp := ((ty & 0xFFFF) << 16) | (tx & 0xFFFF)
+        PostMessage(0x0200, 0,      lp, , "ahk_id " . thwnd)   ; WM_MOUSEMOVE
         Sleep 10
-        PostMessage(0x0201, 0x0001, lp, , "ahk_id " . hwnd)   ; WM_LBUTTONDOWN
+        PostMessage(0x0201, 0x0001, lp, , "ahk_id " . thwnd)   ; WM_LBUTTONDOWN
         Sleep 10
-        PostMessage(0x0202, 0,      lp, , "ahk_id " . hwnd)   ; WM_LBUTTONUP
+        PostMessage(0x0202, 0,      lp, , "ahk_id " . thwnd)   ; WM_LBUTTONUP
         return "消息"
     }
 
@@ -262,6 +324,7 @@ CoordMode "ToolTip", "Screen"
     通用.取色方式     := 取串(m, "取色方式",   "后台")
     通用.点击方式     := 取串(m, "点击方式",   "消息")
     通用.点击后还原   := (取整(m, "点击后还原", 1) = 1)
+    通用.最小化自动还原 := (取整(m, "最小化自动还原", 1) = 1)
     通用.检查间隔     := 取整(m, "检查间隔",   1000)
     通用.点击后等待   := 取整(m, "点击后等待", 800)
     通用.最大点击数   := 取整(m, "最大点击数", 0)
@@ -311,6 +374,9 @@ CoordMode "ToolTip", "Screen"
     L.Push("点击方式=" . 通用.点击方式)
     L.Push("; 仅「前台」模式有效：点完是否把原来那个窗口还原到前台")
     L.Push("点击后还原=" . (通用.点击后还原 ? 1 : 0))
+    L.Push("; 后台模式专用：窗口被最小化时自动还原（最小化状态抓不到画面，")
+    L.Push(";   还原后被别的窗口盖住没关系）。0 = 最小化就暂停并提示")
+    L.Push("最小化自动还原=" . (通用.最小化自动还原 ? 1 : 0))
     L.Push("")
     L.Push("; ─── 通用 ───")
     L.Push("检查间隔=" . 通用.检查间隔)
@@ -391,13 +457,22 @@ CoordMode "ToolTip", "Screen"
         return
     }
 
-    ; 最小化时 PrintWindow 只能抓到任务栏图标大小 —— 直接提示
+    ; 最小化时 PrintWindow 抓不到画面：
+    ;   自动还原 = 把窗口还原（还原后放底层被盖住没关系），继续本轮
+    ;   不自动还原 = 提示用户手动还原
     if (通用.取色方式 = "后台" && DllCall("IsIconic", "Ptr", hwnd, "Int")) {
-        if (A_TickCount - 上次提示时刻 > 400) {
-            刷新提示("（窗口被最小化了，后台取色失效 —— 点任务栏还原它就行，之后被别的窗口盖住都没关系）")
-            上次提示时刻 := A_TickCount
+        if 通用.最小化自动还原 {
+            WinRestore("ahk_id " . hwnd)
+            Sleep 300
+            if DllCall("IsIconic", "Ptr", hwnd, "Int")
+                return
+        } else {
+            if (A_TickCount - 上次提示时刻 > 400) {
+                刷新提示("（窗口被最小化了，后台取色失效 —— 点任务栏还原它就行，之后被别的窗口盖住都没关系）")
+                上次提示时刻 := A_TickCount
+            }
+            return
         }
-        return
     }
 
     if (通用.取色方式 = "屏幕" && 通用.要求窗口激活 && !WinActive("ahk_id " . hwnd)) {
@@ -678,9 +753,14 @@ CoordMode "ToolTip", "Screen"
         return
     }
     if (通用.取色方式 = "后台" && DllCall("IsIconic", "Ptr", hwnd, "Int")) {
-        MsgBox("小游戏窗口目前是最小化的，后台取色抓不到画面。`n`n请点一下任务栏把它还原（之后被别的窗口盖住都没关系）。",
-               "请先还原窗口", "Icon!")
-        return
+        if 通用.最小化自动还原 {
+            WinRestore("ahk_id " . hwnd)
+            Sleep 300
+        } else {
+            MsgBox("小游戏窗口目前是最小化的，后台取色抓不到画面。`n`n请点一下任务栏把它还原（之后被别的窗口盖住都没关系）。",
+                   "请先还原窗口", "Icon!")
+            return
+        }
     }
 
     if (当前规则 > 规则集.Length)
@@ -747,9 +827,47 @@ F2:: {
 
 ; ══════════════════════════════════════════════════════════════
 ; 调试用命令行开关
-;   color-click.ahk /dump    打印解析出的配置后退出
-;   color-click.ahk /probe   后台抓一帧，打印各监视点当前颜色后退出
+;   color-click.ahk /dump          打印解析出的配置后退出
+;   color-click.ahk /probe         后台抓一帧，打印各监视点当前颜色后退出
+;   color-click.ahk /testclick N   对规则 N 的点击点发一次消息点击（验证用）
 ; ══════════════════════════════════════════════════════════════
+if (A_Args.Length > 1 && A_Args[1] = "/testclick") {
+    s := ""
+    if 加载配置(true) {
+        n := Integer(A_Args[2])
+        hwnd := WinExist(通用.目标窗口)
+        if !hwnd {
+            s := "目标窗口未找到`r`n"
+        } else if (n < 1 || n > 规则集.Length) {
+            s := "规则编号超出范围（1-" . 规则集.Length . "）`r`n"
+        } else {
+            r := 规则集[n]
+            if DllCall("IsIconic", "Ptr", hwnd, "Int") {
+                if 通用.最小化自动还原 {
+                    WinRestore("ahk_id " . hwnd)
+                    Sleep 300
+                } else {
+                    FileAppend "窗口处于最小化，无法测试（最小化自动还原=0）`r`n", "*"
+                    ExitApp()
+                }
+            }
+            取几何(hwnd, &wx, &wy, &ww, &wh, &offx, &offy, &cw, &ch)
+            cx := offx + Round(r.点击点RX / 100 * cw)
+            cy := offy + Round(r.点击点RY / 100 * ch)
+            找消息目标(hwnd, cx, cy, &thwnd, &tx, &ty)
+            s .= "点击点(顶层客户区 " . cx . "," . cy . ")  ->  消息目标 hwnd=" . thwnd .
+                  "  class=" . WinGetClass("ahk_id " . thwnd) .
+                  "  目标客户区坐标(" . tx . "," . ty . ")`r`n"
+            点击(hwnd, cx, cy, wx + cx, wy + cy)
+            s .= "已发送一次消息点击，观察游戏窗口有没有反应`r`n"
+        }
+    } else {
+        s := "配置加载失败`r`n"
+    }
+    FileAppend s, "*"
+    ExitApp()
+}
+
 if (A_Args.Length > 0 && (A_Args[1] = "/dump" || A_Args[1] = "/probe")) {
     s := ""
     if 加载配置(true) {
